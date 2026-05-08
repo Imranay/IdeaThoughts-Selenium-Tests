@@ -12,7 +12,7 @@ pipeline {
         string(
             name: 'APP_REPO',
             defaultValue: 'https://github.com/Imranay/IdeaThoughts.git',
-            description: 'GitHub URL of the IdeaThoughts application repository'
+            description: 'GitHub URL of the IdeaThoughts Flask application repository'
         )
 
         string(
@@ -24,29 +24,27 @@ pipeline {
         string(
             name: 'APP_PORT',
             defaultValue: '9090',
-            description: 'Public/local port where Flask app is exposed'
+            description: 'Port where IdeaThoughts app is exposed on EC2'
         )
 
         string(
             name: 'PUBLIC_APP_URL',
-            defaultValue: '',
-            description: 'Optional public application URL. Leave empty to auto-detect EC2 public IP.'
+            defaultValue: 'http://16.16.127.48:9090',
+            description: 'Public URL of the deployed IdeaThoughts application'
         )
 
         string(
-            name: 'DEFAULT_RECIPIENTS',
-            defaultValue: 'qasimalik@gmail.com',
-            description: 'Default email recipients. Comma-separated emails allowed.'
+            name: 'EMAIL_RECIPIENTS_PARAM',
+            defaultValue: 'qasimalik@gmail.com,emeebaltii007@gmail.com',
+            description: 'Comma-separated recipient emails for Jenkins result notification'
         )
     }
 
     environment {
-        LOCAL_APP_URL = "http://127.0.0.1:${params.APP_PORT}"
-        TEST_IMAGE = "ideathoughts-selenium-tests:${BUILD_NUMBER}"
-        EMAIL_RECIPIENTS = ""
-        PUBLIC_APP_URL_FINAL = ""
-        COMMIT_AUTHOR_EMAIL = ""
-        COMMIT_AUTHOR_NAME = ""
+        LOCAL_APP_URL = ''
+        PUBLIC_APP_URL_FINAL = ''
+        EMAIL_RECIPIENTS = ''
+        TEST_IMAGE = ''
     }
 
     stages {
@@ -57,87 +55,49 @@ pipeline {
             }
         }
 
-        stage('Clone Selenium Test Code') {
-            steps {
-                sh 'git clone ${TEST_REPO} tests'
-
-                dir('tests') {
-                    script {
-                        env.COMMIT_AUTHOR_EMAIL = sh(
-                            script: "git log -1 --pretty=%ae || true",
-                            returnStdout: true
-                        ).trim()
-
-                        env.COMMIT_AUTHOR_NAME = sh(
-                            script: "git log -1 --pretty=%an || true",
-                            returnStdout: true
-                        ).trim()
-
-                        echo "Latest Commit Author: ${env.COMMIT_AUTHOR_NAME}"
-                        echo "Latest Commit Author Email: ${env.COMMIT_AUTHOR_EMAIL}"
-                    }
-                }
-            }
-        }
-
-        stage('Prepare Dynamic Values') {
+        stage('Prepare Pipeline Variables') {
             steps {
                 script {
-                    // Build dynamic public application URL
+                    env.LOCAL_APP_URL = "http://127.0.0.1:${params.APP_PORT}"
+                    env.TEST_IMAGE = "ideathoughts-selenium-tests:${env.BUILD_NUMBER}"
+
                     if (params.PUBLIC_APP_URL?.trim()) {
                         env.PUBLIC_APP_URL_FINAL = params.PUBLIC_APP_URL.trim()
                     } else {
-                        def detectedIp = sh(
-                            script: '''
-                            TOKEN=$(curl -sS --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" \
-                              -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
-
-                            if [ -n "$TOKEN" ]; then
-                              IP=$(curl -sS --max-time 2 \
-                                -H "X-aws-ec2-metadata-token: $TOKEN" \
-                                http://169.254.169.254/latest/meta-data/public-ipv4 || true)
-                            fi
-
-                            if [ -z "$IP" ]; then
-                              IP=$(hostname -I | awk '{print $1}')
-                            fi
-
-                            echo "$IP"
-                            ''',
-                            returnStdout: true
-                        ).trim()
-
-                        env.PUBLIC_APP_URL_FINAL = "http://${detectedIp}:${params.APP_PORT}"
+                        env.PUBLIC_APP_URL_FINAL = "http://127.0.0.1:${params.APP_PORT}"
                     }
 
-                    // Build dynamic email recipient list
-                    def recipients = []
+                    def validRecipients = params.EMAIL_RECIPIENTS_PARAM
+                        .split(',')
+                        .collect { it.trim() }
+                        .findAll { email ->
+                            email &&
+                            email.toLowerCase() != 'null' &&
+                            email.toLowerCase() != 'admin' &&
+                            email.contains('@')
+                        }
+                        .unique()
 
-                    if (params.DEFAULT_RECIPIENTS?.trim()) {
-                        recipients.addAll(
-                            params.DEFAULT_RECIPIENTS
-                                .split(',')
-                                .collect { it.trim() }
-                                .findAll { it }
-                        )
+                    if (validRecipients.isEmpty()) {
+                        validRecipients = ['emeebaltii007@gmail.com']
                     }
 
-                    if (env.COMMIT_AUTHOR_EMAIL ==~ /(?i)^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/) {
-                        recipients.add(env.COMMIT_AUTHOR_EMAIL)
-                    }
-
-                    env.EMAIL_RECIPIENTS = recipients.unique().join(',')
+                    env.EMAIL_RECIPIENTS = validRecipients.join(',')
 
                     echo "Local App URL: ${env.LOCAL_APP_URL}"
                     echo "Public App URL: ${env.PUBLIC_APP_URL_FINAL}"
                     echo "Email Recipients: ${env.EMAIL_RECIPIENTS}"
+                    echo "Test Docker Image: ${env.TEST_IMAGE}"
                 }
             }
         }
 
         stage('Clone IdeaThoughts Application') {
             steps {
-                sh 'git clone ${APP_REPO} app'
+                sh '''
+                echo "Cloning IdeaThoughts application repository..."
+                git clone "$APP_REPO" app
+                '''
             }
         }
 
@@ -145,18 +105,19 @@ pipeline {
             steps {
                 dir('app') {
                     sh '''
-                    echo "Cleaning old IdeaThoughts containers if they exist..."
-
+                    echo "Removing old containers if they exist..."
                     docker rm -f ideathoughts_app ideathoughts_db || true
+
+                    echo "Stopping old Docker Compose environment..."
                     docker compose down -v --remove-orphans || true
 
-                    echo "Starting IdeaThoughts application using Docker Compose..."
-
+                    echo "Starting IdeaThoughts application with Docker Compose..."
                     docker compose up -d --build
 
-                    echo "Waiting for database and Flask app to become ready..."
+                    echo "Waiting for MySQL and Flask application to become ready..."
                     sleep 60
 
+                    echo "Currently running containers:"
                     docker ps
                     '''
                 }
@@ -166,7 +127,7 @@ pipeline {
         stage('Check Application Reachability') {
             steps {
                 sh '''
-                echo "Checking application at: $LOCAL_APP_URL"
+                echo "Checking application reachability at $LOCAL_APP_URL"
 
                 for i in $(seq 1 30); do
                     if curl -fsS "$LOCAL_APP_URL" > /dev/null; then
@@ -179,13 +140,23 @@ pipeline {
                 done
 
                 echo "Application failed to become reachable."
-                echo "App container logs:"
+
+                echo "IdeaThoughts app logs:"
                 docker logs ideathoughts_app || true
 
-                echo "Database container logs:"
+                echo "IdeaThoughts database logs:"
                 docker logs ideathoughts_db || true
 
                 exit 1
+                '''
+            }
+        }
+
+        stage('Clone Selenium Test Code') {
+            steps {
+                sh '''
+                echo "Cloning Selenium test repository..."
+                git clone "$TEST_REPO" tests
                 '''
             }
         }
@@ -195,7 +166,7 @@ pipeline {
                 dir('tests') {
                     sh '''
                     echo "Building Selenium test Docker image..."
-                    docker build -t $TEST_IMAGE .
+                    docker build -t "$TEST_IMAGE" .
                     '''
                 }
             }
@@ -205,15 +176,16 @@ pipeline {
             steps {
                 dir('tests') {
                     sh '''
+                    echo "Creating reports folder..."
                     mkdir -p reports
 
-                    echo "Running Selenium tests against: $LOCAL_APP_URL"
+                    echo "Running Selenium tests against $LOCAL_APP_URL"
 
                     docker run --rm \
                       --network host \
-                      -e APP_URL=$LOCAL_APP_URL \
+                      -e APP_URL="$LOCAL_APP_URL" \
                       -v "$PWD/reports:/tests/reports" \
-                      $TEST_IMAGE
+                      "$TEST_IMAGE"
                     '''
                 }
             }
@@ -227,7 +199,7 @@ pipeline {
             archiveArtifacts artifacts: 'tests/reports/*', allowEmptyArchive: true
             junit testResults: 'tests/reports/results.xml', allowEmptyResults: true
 
-            echo "Sending pipeline email notification..."
+            echo "Sending Jenkins email notification..."
 
             mail(
                 to: "${env.EMAIL_RECIPIENTS}",
@@ -241,12 +213,6 @@ ${currentBuild.currentResult}
 Build Number:
 ${env.BUILD_NUMBER}
 
-Triggered Commit Author:
-${env.COMMIT_AUTHOR_NAME}
-
-Commit Author Email:
-${env.COMMIT_AUTHOR_EMAIL}
-
 Public Application URL:
 ${env.PUBLIC_APP_URL_FINAL}
 
@@ -257,12 +223,15 @@ Jenkins Build URL:
 ${env.BUILD_URL}
 
 Selenium test results are available inside Jenkins build artifacts.
+
+Note:
+This email was sent automatically by Jenkins after running the Dockerized Selenium test pipeline.
 """
             )
         }
 
         cleanup {
-            echo "Cleaning Docker containers after pipeline..."
+            echo "Cleaning Docker containers and test image..."
 
             dir('app') {
                 sh '''
@@ -272,7 +241,7 @@ Selenium test results are available inside Jenkins build artifacts.
             }
 
             sh '''
-            docker rmi $TEST_IMAGE || true
+            docker rmi "$TEST_IMAGE" || true
             docker system prune -f || true
             '''
         }
