@@ -89,7 +89,7 @@ pipeline {
 
                 Selenium test report is attached/archived in Jenkins build artifacts.
                 """,
-                to: 'qasimalik@gmail.com'
+                to: 'qasimalik@gmail.com, emeebaltii007@gmail.com'
             )
         }
 
