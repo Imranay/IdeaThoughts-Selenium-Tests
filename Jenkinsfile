@@ -15,8 +15,14 @@ pipeline {
         LOCAL_APP_URL = 'http://127.0.0.1:9090'
         PUBLIC_APP_URL = 'http://16.16.127.48:9090'
 
-        EMAIL_RECIPIENTS = 'qasimalik@gmail.com,emeebaltii007@gmail.com'
+        FALLBACK_EMAIL = 'emeebaltii007@gmail.com'
+        EMAIL_RECIPIENTS = 'emeebaltii007@gmail.com'
+
         TEST_IMAGE = 'ideathoughts-selenium-tests'
+
+        TRIGGER_TYPE = 'UNKNOWN'
+        APP_COMMIT_AUTHOR = 'UNKNOWN'
+        APP_COMMIT_EMAIL = 'UNKNOWN'
     }
 
     stages {
@@ -27,6 +33,22 @@ pipeline {
             }
         }
 
+        stage('Detect Build Trigger') {
+            steps {
+                script {
+                    def userCauses = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+
+                    if (userCauses != null && userCauses.size() > 0) {
+                        env.TRIGGER_TYPE = 'MANUAL'
+                    } else {
+                        env.TRIGGER_TYPE = 'SCM_OR_WEBHOOK'
+                    }
+
+                    echo "Build Trigger Type: ${env.TRIGGER_TYPE}"
+                }
+            }
+        }
+
         stage('Show Pipeline Variables') {
             steps {
                 sh '''
@@ -34,7 +56,8 @@ pipeline {
                 echo "TEST_REPO=$TEST_REPO"
                 echo "LOCAL_APP_URL=$LOCAL_APP_URL"
                 echo "PUBLIC_APP_URL=$PUBLIC_APP_URL"
-                echo "EMAIL_RECIPIENTS=$EMAIL_RECIPIENTS"
+                echo "FALLBACK_EMAIL=$FALLBACK_EMAIL"
+                echo "TRIGGER_TYPE=$TRIGGER_TYPE"
                 echo "TEST_IMAGE=$TEST_IMAGE"
                 '''
             }
@@ -46,6 +69,66 @@ pipeline {
                 echo "Cloning IdeaThoughts application repository..."
                 git clone "$APP_REPO" app
                 '''
+            }
+        }
+
+        stage('Prepare Email Recipients') {
+            steps {
+                dir('app') {
+                    script {
+                        env.APP_COMMIT_AUTHOR = sh(
+                            script: "git log -1 --pretty=%an || echo UNKNOWN",
+                            returnStdout: true
+                        ).trim()
+
+                        env.APP_COMMIT_EMAIL = sh(
+                            script: "git log -1 --pretty=%ae || echo UNKNOWN",
+                            returnStdout: true
+                        ).trim()
+
+                        echo "App Commit Author: ${env.APP_COMMIT_AUTHOR}"
+                        echo "App Commit Email: ${env.APP_COMMIT_EMAIL}"
+
+                        def recipients = []
+
+                        /*
+                         * Manual build:
+                         * Sir ko email nahi jayegi.
+                         * Sirf fallback email yani aapka email use hoga.
+                         */
+                        if (env.TRIGGER_TYPE == 'MANUAL') {
+                            recipients.add(env.FALLBACK_EMAIL)
+                        }
+
+                        /*
+                         * GitHub webhook / SCM trigger:
+                         * Latest app commit author ko email bhejne ki try hogi.
+                         */
+                        if (env.TRIGGER_TYPE == 'SCM_OR_WEBHOOK') {
+                            recipients.add(env.FALLBACK_EMAIL)
+
+                            def email = env.APP_COMMIT_EMAIL?.trim()
+
+                            if (
+                                email &&
+                                email.toLowerCase() != 'null' &&
+                                email.toLowerCase() != 'unknown' &&
+                                email.toLowerCase() != 'admin' &&
+                                email.contains('@') &&
+                                !email.toLowerCase().contains('noreply')
+                            ) {
+                                recipients.add(email)
+                            }
+                        }
+
+                        env.EMAIL_RECIPIENTS = recipients
+                            .findAll { it && it.contains('@') && it.toLowerCase() != 'null' }
+                            .unique()
+                            .join(',')
+
+                        echo "Final Email Recipients: ${env.EMAIL_RECIPIENTS}"
+                    }
+                }
             }
         }
 
@@ -147,7 +230,7 @@ pipeline {
             archiveArtifacts artifacts: 'tests/reports/*', allowEmptyArchive: true
             junit testResults: 'tests/reports/results.xml', allowEmptyResults: true
 
-            echo "Sending Jenkins email notification..."
+            echo "Sending Jenkins email notification to: ${env.EMAIL_RECIPIENTS}"
 
             mail(
                 to: "${env.EMAIL_RECIPIENTS}",
@@ -160,6 +243,15 @@ ${currentBuild.currentResult}
 
 Build Number:
 ${env.BUILD_NUMBER}
+
+Build Trigger Type:
+${env.TRIGGER_TYPE}
+
+Application Commit Author:
+${env.APP_COMMIT_AUTHOR}
+
+Application Commit Email:
+${env.APP_COMMIT_EMAIL}
 
 Public Application URL:
 ${env.PUBLIC_APP_URL}
