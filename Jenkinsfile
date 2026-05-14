@@ -13,7 +13,7 @@ pipeline {
         TEST_REPO = 'https://github.com/Imranay/IdeaThoughts-Selenium-Tests.git'
 
         LOCAL_APP_URL = 'http://127.0.0.1:9090'
-        PUBLIC_APP_URL = 'http://16.16.127.48:9090'
+        PUBLIC_APP_URL = 'http://16.171.61.209/:9090'
 
         FALLBACK_EMAIL = 'emeebaltii007@gmail.com'
         EMAIL_RECIPIENTS = 'emeebaltii007@gmail.com'
